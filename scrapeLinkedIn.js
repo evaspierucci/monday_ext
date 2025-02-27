@@ -3,11 +3,19 @@ const { google } = require('googleapis');
 const path = require('path');
 const fs = require('fs');
 
+
 // Google Sheets API Authentication
 const SCOPES = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive'];
 const SPREADSHEET_ID = '1Tp6fb-iXuaZSfy8mJcZNYbayaZt51lbaJsHyGW6OylY';  // Updated Google Sheets ID
-const CREDENTIALS_PATH = path.join(__dirname, 'linkedin-scraper-452115-55e44da21018.json');  // Updated credentials path
+require('dotenv').config(); // Load environment variables
+const CREDENTIALS_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
+if (!CREDENTIALS_PATH) {
+  console.error("❌ GOOGLE_APPLICATION_CREDENTIALS is not set. Make sure your .env file is configured properly.");
+  process.exit(1);
+}
+
+console.log("✅ Using credentials from:", CREDENTIALS_PATH);
 // Authenticate Google Sheets API
 async function authenticateGoogleSheets() {
   const credentials = JSON.parse(fs.readFileSync(CREDENTIALS_PATH));
