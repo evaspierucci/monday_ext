@@ -2,6 +2,7 @@ require('dotenv').config();
 const puppeteer = require('puppeteer');
 const { google } = require('googleapis');
 const fs = require('fs');
+const express = require('express');
 
 // Load your credentials from the environment variable
 const CREDENTIALS_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS;
@@ -94,16 +95,17 @@ async function readJobUrls() {
 async function updateGoogleSheet(jobData, rowIndex) {
     const values = [
         [
-            jobData.jobTitle,
-            jobData.companyName,
-            jobData.location,
-            jobData.jobDescription,
+            jobData.jobTitle || 'Not Found',
+            jobData.companyName || 'Not Found',
+            jobData.location || 'Not Found',
+            jobData.jobDescription || 'Not Found',
         ],
     ];
 
     const resource = { values };
 
     try {
+        console.log(`Updating row ${rowIndex} with data:`, values);
         // Write to columns B-E in the same row as the URL
         const range = `${sheetName}!B${rowIndex}:E${rowIndex}`;
         const response = await sheets.spreadsheets.values.update({
@@ -112,35 +114,63 @@ async function updateGoogleSheet(jobData, rowIndex) {
             valueInputOption: 'RAW',
             resource,
         });
-        console.log(`✅ Row ${rowIndex} updated successfully`);
+        console.log(`✅ Row ${rowIndex} updated successfully:`, response.data);
+        return true;
     } catch (error) {
-        console.error(`❌ Error updating Google Sheet row ${rowIndex}: ${error.message}`);
+        console.error(`❌ Error updating Google Sheet row ${rowIndex}:`, error);
+        throw error; // Propagate error up
     }
 }
 
-// Main execution function
-async function main() {
-    const urls = await readJobUrls();
+const app = express();
+app.use(express.json());
+
+// Add this near the top of your express setup
+app.use((req, res, next) => {
+  console.log('Received request:', req.method, req.url, req.body);
+  next();
+});
+
+// Modify the /scrape endpoint
+app.post('/scrape', async (req, res) => {
+    console.log('\n--- New Scrape Request ---');
+    console.log('Received scrape request:', req.body);
+    const { url, row } = req.body;
     
-    for (let i = 0; i < urls.length; i++) {
-        const url = urls[i][0]; // Get URL from the first column
-        const rowIndex = i + 2; // Calculate the correct row number (adding 2 because we start from row 2)
+    if (!url || !row) {
+        console.error('Missing required parameters');
+        return res.status(400).json({ error: 'Missing URL or row number' });
+    }
+    
+    try {
+        console.log('Starting to scrape URL:', url);
+        const jobData = await scrapeLinkedInJob(url);
+        console.log('Scraped job data:', jobData);
         
-        console.log(`Processing URL ${i + 1}/${urls.length}: ${url}`);
-        
-        try {
-            const jobData = await scrapeLinkedInJob(url);
-            await updateGoogleSheet(jobData, rowIndex);
-            
-            // Add a small delay between requests to avoid rate limiting
-            await new Promise(resolve => setTimeout(resolve, 2000));
-        } catch (error) {
-            console.error(`❌ Error processing URL ${url}:`, error.message);
-            continue; // Continue with next URL even if one fails
+        if (!jobData.jobTitle || !jobData.companyName) {
+            throw new Error('Failed to scrape job data properly');
         }
+        
+        const updateResult = await updateGoogleSheet(jobData, row);
+        console.log('Google Sheet update result:', updateResult);
+        
+        res.json({ 
+            success: true,
+            data: jobData,
+            message: `Successfully updated row ${row}`
+        });
+    } catch (error) {
+        console.error('Error in /scrape endpoint:', error);
+        res.status(500).json({ 
+            error: error.message,
+            success: false,
+            stack: error.stack
+        });
     }
-    
-    console.log('✅ All URLs processed');
-}
+});
 
-main();
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+});
