@@ -1,176 +1,140 @@
 require('dotenv').config();
 const puppeteer = require('puppeteer');
 const { google } = require('googleapis');
-const fs = require('fs');
-const express = require('express');
+const logger = require('./logger');
+const config = require('./config');
+const createServer = require('./server');
 
-// Load your credentials from the environment variable
-const CREDENTIALS_PATH = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+// Disable all debug logging
+process.env.DEBUG = '';
+process.env.NODE_NO_WARNINGS = '1';
+process.env.PUPPETEER_DISABLE_HEADLESS_WARNING = 'true';
+process.env.NODE_ENV = 'production';
+process.env.NO_COLOR = '1';
 
-if (!CREDENTIALS_PATH) {
-    console.error("❌ GOOGLE_APPLICATION_CREDENTIALS is not set.");
+// Load credentials and setup
+const { GOOGLE_APPLICATION_CREDENTIALS, SPREADSHEET_ID, SHEET_NAME } = process.env;
+
+if (!GOOGLE_APPLICATION_CREDENTIALS) {
+    logger.error("❌ GOOGLE_APPLICATION_CREDENTIALS is not set.");
     process.exit(1);
 }
 
-const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
-const spreadsheetId = '1Tp6fb-iXuaZSfy8mJcZNYbayaZt51lbaJsHyGW6OylY';  // Replace with your Google Sheet ID
-const sheetName = 'Job Data';  // Adjust if your sheet has a different name
-
 // Authenticate with Google Sheets API
 const auth = new google.auth.GoogleAuth({
-    keyFile: CREDENTIALS_PATH,
-    scopes: SCOPES,
+    keyFile: GOOGLE_APPLICATION_CREDENTIALS,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
 });
 
 const sheets = google.sheets({ version: 'v4', auth });
 
-// Scrape LinkedIn job details
 async function scrapeLinkedInJob(url) {
-    const browser = await puppeteer.launch({ headless: true });
-    const page = await browser.newPage();
+    const browser = await puppeteer.launch(config.puppeteer);
     
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36');
-    console.log(`Navigating to ${url}...`);
-    await page.goto(url, { waitUntil: 'networkidle2' });
-
     try {
-        const jobData = await page.evaluate(() => {
-            // More robust selectors that try multiple possible elements
-            const jobTitle = (
-                document.querySelector('h1.top-card-layout__title')?.textContent ||
-                document.querySelector('h1')?.textContent ||
-                'Not Found'
-            ).trim();
-
-            const companyName = (
-                document.querySelector('a.top-card-layout__company-url')?.textContent ||
-                document.querySelector('.topcard__org-name-link')?.textContent ||
-                document.querySelector('.company-name')?.textContent ||
-                'Not Found'
-            ).trim();
-
-            const location = (
-                document.querySelector('span.top-card__location')?.textContent ||
-                document.querySelector('.topcard__flavor--bullet')?.textContent ||
-                document.querySelector('.job-location')?.textContent ||
-                'Not Found'
-            ).trim();
-
-            const jobDescription = (
-                document.querySelector('div.show-more-less-html__markup')?.textContent ||
-                document.querySelector('.description__text')?.textContent ||
-                'Not Found'
-            ).trim();
-
-            return { jobTitle, companyName, location, jobDescription };
+        const page = await browser.newPage();
+        
+        // Block all unnecessary resources
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            if (['image', 'stylesheet', 'font', 'media'].includes(req.resourceType())) {
+                req.abort();
+            } else {
+                req.continue();
+            }
         });
 
-        console.log("🎉 Job Data Extracted Successfully:", jobData);
-        return jobData;
+        // Set a longer timeout and wait for content
+        await page.setDefaultNavigationTimeout(45000);
+        await page.goto(url, { waitUntil: 'networkidle0' });
+        await new Promise(resolve => setTimeout(resolve, 3000));
 
-    } catch (error) {
-        console.error("❌ Error extracting data:", error);
-        throw error;
+        const jobData = await page.evaluate(() => {
+            const getTextContent = (selector) => {
+                const element = document.querySelector(selector);
+                return element ? element.textContent.trim() : null;
+            };
+
+            return {
+                jobTitle: getTextContent('h1.top-card-layout__title') || 
+                         getTextContent('h1') || 
+                         'Not Found',
+                companyName: getTextContent('a.top-card-layout__company-url') || 
+                           getTextContent('.topcard__org-name-link') || 
+                           getTextContent('.company-name') || 
+                           'Not Found',
+                location: getTextContent('span.top-card__location') || 
+                         getTextContent('.topcard__flavor--bullet') || 
+                         getTextContent('.job-location') || 
+                         'Not Found',
+                jobDescription: getTextContent('div.show-more-less-html__markup') || 
+                              getTextContent('.description__text') || 
+                              'Not Found'
+            };
+        });
+
+        return jobData;
     } finally {
         await browser.close();
     }
 }
 
-// Function to read URLs from the sheet
-async function readJobUrls() {
-    try {
-        const response = await sheets.spreadsheets.values.get({
-            spreadsheetId,
-            range: `${sheetName}!A2:A`, // Read all URLs from column A starting from row 2
-        });
-        
-        return response.data.values || [];
-    } catch (error) {
-        console.error('❌ Error reading URLs:', error.message);
-        return [];
-    }
-}
-
-// Update Google Sheets with the scraped job data
 async function updateGoogleSheet(jobData, rowIndex) {
-    const values = [
-        [
-            jobData.jobTitle || 'Not Found',
-            jobData.companyName || 'Not Found',
-            jobData.location || 'Not Found',
-            jobData.jobDescription || 'Not Found',
-        ],
-    ];
-
-    const resource = { values };
+    const values = [[
+        jobData.jobTitle || 'Not Found',
+        jobData.companyName || 'Not Found',
+        jobData.location || 'Not Found',
+        jobData.jobDescription || 'Not Found',
+    ]];
 
     try {
-        console.log(`Updating row ${rowIndex} with data:`, values);
-        // Write to columns B-E in the same row as the URL
-        const range = `${sheetName}!B${rowIndex}:E${rowIndex}`;
-        const response = await sheets.spreadsheets.values.update({
-            spreadsheetId,
+        const range = `${SHEET_NAME}!B${rowIndex}:E${rowIndex}`;
+        await sheets.spreadsheets.values.update({
+            spreadsheetId: SPREADSHEET_ID,
             range,
             valueInputOption: 'RAW',
-            resource,
+            resource: { values },
         });
-        console.log(`✅ Row ${rowIndex} updated successfully:`, response.data);
         return true;
     } catch (error) {
-        console.error(`❌ Error updating Google Sheet row ${rowIndex}:`, error);
-        throw error; // Propagate error up
+        logger.error(`Failed to update sheet at row ${rowIndex}:`, error.message);
+        throw error;
     }
 }
 
-const app = express();
-app.use(express.json());
+// Create express app with minimal logging
+const app = createServer();
 
-// Add this near the top of your express setup
-app.use((req, res, next) => {
-  console.log('Received request:', req.method, req.url, req.body);
-  next();
-});
-
-// Modify the /scrape endpoint
+// Handle scraping requests
 app.post('/scrape', async (req, res) => {
-    console.log('\n--- New Scrape Request ---');
-    console.log('Received scrape request:', req.body);
     const { url, row } = req.body;
     
     if (!url || !row) {
-        console.error('Missing required parameters');
         return res.status(400).json({ error: 'Missing URL or row number' });
     }
-    
+
     try {
-        console.log('Starting to scrape URL:', url);
+        logger.important(`Processing job at row ${row}`);
         const jobData = await scrapeLinkedInJob(url);
-        console.log('Scraped job data:', jobData);
         
-        if (!jobData.jobTitle || !jobData.companyName) {
-            throw new Error('Failed to scrape job data properly');
+        if (!jobData.jobTitle || jobData.jobTitle === 'Not Found') {
+            throw new Error('Failed to extract job data');
         }
         
-        const updateResult = await updateGoogleSheet(jobData, row);
-        console.log('Google Sheet update result:', updateResult);
-        
-        res.json({ 
-            success: true,
-            data: jobData,
-            message: `Successfully updated row ${row}`
-        });
+        await updateGoogleSheet(jobData, row);
+        logger.success(`Updated row ${row}`);
+        res.json({ success: true });
     } catch (error) {
-        console.error('Error in /scrape endpoint:', error);
-        res.status(500).json({ 
-            error: error.message,
-            success: false,
-            stack: error.stack
-        });
+        logger.error(`Failed to process row ${row}:`, error.message);
+        res.status(500).json({ error: error.message });
     }
 });
 
-// Start server
+// Start server quietly
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
+const server = app.listen(PORT, () => {
+    logger.important(`Server running on port ${PORT}`);
 });
+
+// Disable server logging
+server.on('connection', () => {});

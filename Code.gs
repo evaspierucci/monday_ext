@@ -38,51 +38,88 @@ function onEdit(e) {
   const sheet = range.getSheet();
   
   Logger.log('Edit event triggered');
-  Logger.log('Sheet name: ' + sheet.getName());
-  Logger.log('Column: ' + range.getColumn());
-  Logger.log('Row: ' + range.getRow());
-  Logger.log('Value: ' + range.getValue());
+  Logger.log(`Sheet: ${sheet.getName()}, Column: ${range.getColumn()}, Row: ${range.getRow()}, Value: ${range.getValue()}`);
+  
+  // Only process edits in the main sheet
+  if (sheet.getName() !== 'Job Data') {
+    Logger.log('Ignoring edit in non-job sheet');
+    return;
+  }
   
   // Check if the edit was in the buttons column (F)
   if (range.getColumn() === 6 && range.getValue() === true) {
     Logger.log('Checkbox checked in column F');
     const row = range.getRow();
     const url = sheet.getRange(row, 1).getValue(); // Get URL from column A
-    Logger.log('URL found: ' + url);
+    Logger.log(`Processing row ${row} with URL: ${url}`);
     
-    if (url) {
-      try {
-        Logger.log('Sending request to server...');
-        const response = UrlFetchApp.fetch('https://7176-2a02-1210-78d4-9300-79bb-36df-eaaf-e67a.ngrok-free.app/scrape', {
-          'method': 'post',
-          'contentType': 'application/json',
-          'payload': JSON.stringify({
-            url: url,
-            row: row
-          }),
-          'muteHttpExceptions': true
-        });
-        
-        const responseText = response.getContentText();
-        Logger.log('Server response: ' + responseText);
-        
-        // Parse response and update sheet if needed
-        const responseData = JSON.parse(responseText);
-        if (responseData.success) {
-          Logger.log('Request successful');
-          // Force refresh the sheet
-          SpreadsheetApp.flush();
-        } else {
-          Logger.log('Request failed: ' + responseData.error);
-        }
-        
-        // Reset checkbox
-        range.setValue(false);
-        
-      } catch (error) {
-        Logger.log('Error: ' + error.toString());
-        range.setValue(false);
-      }
+    if (!url) {
+      Logger.log('No URL found in row ' + row);
+      range.setValue(false);
+      return;
     }
+    
+    try {
+      const configSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Config');
+      if (!configSheet) {
+        throw new Error('Config sheet not found. Please create a sheet named "Config" with the server URL in cell A1');
+      }
+      
+      const serverUrl = configSheet.getRange('A1').getValue();
+      if (!serverUrl) {
+        throw new Error('Server URL not found in Config sheet cell A1');
+      }
+      
+      Logger.log('Using server URL: ' + serverUrl);
+      
+      const response = UrlFetchApp.fetch(serverUrl + '/scrape', {
+        'method': 'post',
+        'contentType': 'application/json',
+        'payload': JSON.stringify({
+          url: url,
+          row: row
+        }),
+        'muteHttpExceptions': true
+      });
+      
+      const responseText = response.getContentText();
+      Logger.log('Server response: ' + responseText);
+      
+      const responseData = JSON.parse(responseText);
+      if (responseData.success) {
+        Logger.log('Request successful');
+        SpreadsheetApp.flush();
+      } else {
+        throw new Error(responseData.error || 'Unknown error');
+      }
+      
+    } catch (error) {
+      Logger.log('Error: ' + error.toString());
+      SpreadsheetApp.getUi().alert('Error: ' + error.message);
+    } finally {
+      range.setValue(false);
+    }
+  }
+}
+
+// Test function - don't use this for actual scraping
+function testServerConnection() {
+  const configSheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('Config');
+  const serverUrl = configSheet ? configSheet.getRange('A1').getValue() : '';
+  
+  if (!serverUrl) {
+    Logger.log('No server URL found in Config sheet');
+    return;
+  }
+  
+  try {
+    const response = UrlFetchApp.fetch(serverUrl + '/test', {
+      'method': 'get',
+      'muteHttpExceptions': true
+    });
+    
+    Logger.log('Test response: ' + response.getContentText());
+  } catch (error) {
+    Logger.log('Test error: ' + error.toString());
   }
 } 

@@ -3,6 +3,7 @@
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "googleapis": "^144.0.0",
+    "morgan": "^1.10.0",
     "puppeteer": "^24.3.0"
   },
   "name": "monday_ext",
